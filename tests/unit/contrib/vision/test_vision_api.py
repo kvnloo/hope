@@ -472,7 +472,7 @@ def test_callback_view_missing_fc_returns_ko(mock_get, mock_log_entry) -> None:
         "status": "KO",
         "messageId": "AGoSIRjbhXM_6L58Q2zj3MevWx81",
         "payplanSno": "PP043",
-        "message": "FC not found",
+        "message": "FC number is missing",
     }
     assert "vision" in mock_pp.internal_data
     entry = mock_pp.internal_data["vision"]["log"][0]
@@ -480,7 +480,7 @@ def test_callback_view_missing_fc_returns_ko(mock_get, mock_log_entry) -> None:
     assert datetime.fromisoformat(entry["timestamp"])
     assert entry["payload"]["payplanSno"] == "PP043"
     assert entry["response"]["status"] == "KO"
-    assert entry["response"]["message"] == "FC not found"
+    assert entry["response"]["message"] == "FC number is missing"
     assert mock_pp.internal_data["vision"]["vision_id"] == "00000062"
     assert mock_pp.internal_data["vision"]["status"] == "FC_MISSING"
 
@@ -517,6 +517,7 @@ def test_callback_view_records_payment_plan_created_acknowledgement(mock_get, mo
         "status": "OK",
         "messageId": "msg-created",
         "payplanSno": "PP-0060-24-0000002a",
+        "message": "Callback received",
     }
     vision_data = mock_pp.internal_data["vision"]
     assert vision_data["sent"] is True
@@ -575,6 +576,7 @@ def test_callback_view_success_with_fc_num(mock_get, mock_log_entry) -> None:
         "status": "OK",
         "messageId": "msg-002",
         "payplanSno": "PP044",
+        "message": "Callback received",
     }
     mock_process_callback.assert_called_once_with(
         mock_pp,
@@ -623,6 +625,7 @@ def test_callback_view_success_missing_vision_payplan_sno(mock_get, mock_log_ent
         "status": "KO",
         "messageId": "msg-003",
         "payplanSno": "PP045",
+        "message": "vision_payplanSno is required",
     }
     mock_get.assert_called_once_with("PP045")
     mock_pp.save.assert_called_once_with(update_fields=["internal_data"])
@@ -661,6 +664,7 @@ def test_callback_view_missing_vision_id_preserves_released_state(mock_get, mock
     response = PaymentPlanCallbackView.as_view()(request)
 
     assert response.status_code == 400
+    assert response.data["message"] == "vision_payplanSno is required"
     assert mock_pp.internal_data["vision"]["status"] == "RELEASED"
     assert len(mock_pp.internal_data["vision"]["log"]) == 1
     mock_pp.save.assert_called_once_with(update_fields=["internal_data"])
@@ -668,7 +672,7 @@ def test_callback_view_missing_vision_id_preserves_released_state(mock_get, mock
 
 @patch("hope.models.APILogEntry.objects.create")
 @patch("hope.contrib.vision.views.PaymentPlanCallbackView._get_payment_plan")
-def test_callback_view_not_found_returns_400(mock_get, mock_log_entry) -> None:
+def test_callback_view_not_found_returns_404(mock_get, mock_log_entry) -> None:
     from rest_framework.test import APIRequestFactory, force_authenticate
 
     from hope.contrib.vision.views import PaymentPlanCallbackView
@@ -690,11 +694,12 @@ def test_callback_view_not_found_returns_400(mock_get, mock_log_entry) -> None:
     view = PaymentPlanCallbackView.as_view()
     response = view(request)
 
-    assert response.status_code == 400
+    assert response.status_code == 404
     assert response.data == {
         "status": "KO",
         "messageId": "abc123",
         "payplanSno": "UNKNOWN",
+        "message": "Payment plan not found",
     }
 
 
@@ -735,6 +740,7 @@ def test_callback_view_non_success_status(mock_get, mock_log_entry) -> None:
         "status": "OK",
         "messageId": "msg-001",
         "payplanSno": "PP043",
+        "message": "Callback received",
     }
     assert "vision" in mock_pp.internal_data
     entry = mock_pp.internal_data["vision"]["log"][0]
@@ -795,5 +801,27 @@ def test_callback_view_missing_payplan_sno(mock_get, mock_log_entry) -> None:
         "status": "KO",
         "messageId": "msg-001",
         "payplanSno": "",
+        "message": "Invalid callback payload",
     }
     mock_get.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("vision_data", "expected_message"),
+    [
+        ({"status": VisionStatus.FC_MISSING.value}, "FC number is missing"),
+        ({"status": VisionStatus.FC_NOT_FOUND.value}, "FC not found"),
+        ({"error_code": "FC_AMBIGUOUS"}, "Multiple FC groups found"),
+        ({"error_code": "FC_CONFLICT"}, "FC assignment conflict"),
+        ({}, "FC assignment failed"),
+    ],
+)
+def test_callback_view_fc_failure_message(vision_data, expected_message, django_assert_num_queries) -> None:
+    from hope.contrib.vision.views import PaymentPlanCallbackView
+
+    payment_plan = PaymentPlan(internal_data={"vision": vision_data})
+
+    with django_assert_num_queries(0):
+        message = PaymentPlanCallbackView._fc_failure_message(payment_plan)
+
+    assert message == expected_message
